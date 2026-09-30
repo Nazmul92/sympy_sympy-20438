@@ -1,278 +1,206 @@
-# SymPy
+# sympy\_\_sympy-20438
 
-[![pypi version](https://img.shields.io/pypi/v/sympy.svg)](https://pypi.python.org/pypi/sympy)
-[![Build status](https://secure.travis-ci.org/sympy/sympy.svg?branch=master)](https://travis-ci.org/sympy/sympy)
-[![Join the chat at https://gitter.im/sympy/sympy](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/sympy/sympy?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
-[![Zenodo Badge](https://zenodo.org/badge/18918/sympy/sympy.svg)](https://zenodo.org/badge/latestdoi/18918/sympy/sympy)
-[![codecov Badge](https://codecov.io/gh/sympy/sympy/branch/master/graph/badge.svg)](https://codecov.io/gh/sympy/sympy)
+A focused fix for the SymPy bug reported as
+[sympy/sympy#20438](https://github.com/sympy/sympy/issues/20438): set subset and equality
+queries stayed undecided when they were decidable, and `simplify()` raised on any relation
+whose two sides are sets.
 
-[![SymPy Banner](banner.svg)](https://sympy.org/)
+This repository is the SymPy source tree at the SWE-bench Verified base commit with the fix
+applied on top; no other upstream file is changed. If you only want the change, read
+[`sympy-20438-fix.patch`](sympy-20438-fix.patch) or, equivalently, `git show HEAD~1`.
 
+| | |
+| --- | --- |
+| Instance | `sympy__sympy-20438` — SWE-bench Verified, `test` split |
+| Base commit | `33b47e4bd60e2302e42616141e76285038b724d6` |
+| Fix | `HEAD~1` — 4 files changed, +499 −3 |
+| Patch SHA-256 | `ffd6dc32b3011198477d32f3806341fd740e3008730b472fc9436b453d4a73a9` |
+| Official evaluation | SWE-bench 5.0.2 — `resolved: true`, FAIL_TO_PASS 2/2, PASS_TO_PASS 93/93 |
 
-See the AUTHORS file for the list of authors.
+## The bug
 
-And many more people helped on the SymPy mailing list, reported bugs,
-helped organize SymPy's participation in the Google Summer of Code, the
-Google Highly Open Participation Contest, Google Code-In, wrote and
-blogged about SymPy...
+```python
+>>> from sympy import *
 
-License: New BSD License (see the LICENSE file for details) covers all
-files in the sympy repository unless stated otherwise.
+>>> a = FiniteSet(1, 2)
+>>> ProductSet(a, a).is_subset(FiniteSet((1, 1), (1, 2), (2, 1), (2, 2)))
+None                                       # after the fix: True
 
-Our mailing list is at
-<https://groups.google.com/forum/?fromgroups#!forum/sympy>.
+>>> Eq(ProductSet(FiniteSet(1), FiniteSet(2)), Interval(1, 2))
+Eq(ProductSet(FiniteSet(1), FiniteSet(2)), Interval(1, 2))
+                                           # after the fix: False
 
-We have community chat at [Gitter](https://gitter.im/sympy/sympy). Feel
-free to ask us anything there. We have a very welcoming and helpful
-community.
-
-## Download
-
-The recommended installation method is through Anaconda,
-<https://www.anaconda.com/download/>
-
-You can also get the latest version of SymPy from
-<https://pypi.python.org/pypi/sympy/>
-
-To get the git version do
-
-    $ git clone git://github.com/sympy/sympy.git
-
-For other options (tarballs, debs, etc.), see
-<https://docs.sympy.org/dev/install.html>.
-
-## Documentation and Usage
-
-For in-depth instructions on installation and building the
-documentation, see the [SymPy Documentation Style Guide](https://docs.sympy.org/dev/documentation-style-guide.html).
-
-Everything is at:
-
-<https://docs.sympy.org/>
-
-You can generate everything at the above site in your local copy of
-SymPy by:
-
-    $ cd doc
-    $ make html
-
-Then the docs will be in <span class="title-ref">\_build/html</span>. If
-you don't want to read that, here is a short usage:
-
-From this directory, start Python and:
-
-``` python
->>> from sympy import Symbol, cos
 >>> x = Symbol('x')
->>> e = 1/cos(x)
->>> print(e.series(x, 0, 10))
-1 + x**2/2 + 5*x**4/24 + 61*x**6/720 + 277*x**8/8064 + O(x**10)
+>>> Eq({1}, {x}).simplify()
+AttributeError: 'Complement' object has no attribute 'equals'
+                                           # after the fix: Eq(FiniteSet(1), FiniteSet(x))
 ```
 
-SymPy also comes with a console that is a simple wrapper around the
-classic python console (or IPython when available) that loads the SymPy
-namespace and executes some common commands for you.
+The same `AttributeError` hit every relation between sets, because `simplify()` treated
+`lhs - rhs` as a number. The first two cases are the other half of the issue: the information
+needed to answer was present, but the code never used it.
 
-To start it, issue:
+## Root cause
 
-    $ bin/isympy
+Three independent gaps, which is why the visible symptom looked inconsistent.
 
-from this directory, if SymPy is not installed or simply:
+1. **`is_subset` did not try the elements.** `Set.is_subset` decided `self ⊆ other` by testing
+   `self.intersect(other) == self`, which only works when that intersection is *structurally*
+   equal to `self`. Intersecting `ProductSet(FiniteSet(1, 2), FiniteSet(1, 2))` with the
+   `FiniteSet` of its four tuples gives that `FiniteSet`, so the test never fired and the
+   question fell through to `(Range, Range)`-style handlers that return `None`. A set that is
+   finite is determined by its elements, but nothing ever asked its elements.
 
-    $ isympy
+2. **`ProductSet` could not be iterated and queried consistently.** `ProductSet.__iter__`
+   yields plain `tuple`s, while `ProductSet._contains` only understood `Tuple`. Even a
+   correct elementwise test would therefore have failed on product sets.
 
-if SymPy is installed.
+3. **`Eq`/`Ne` between sets had no general rule.** `_eval_is_eq(Set, Set)` was a stub returning
+   `None`, and the `(ProductSet, ProductSet)` handler decided only from the factors, so
+   `Eq(ProductSet({1}, {2}), Interval(1, 2))` was left unevaluated even though `(1, 2)` is
+   plainly not a point of `[1, 2]`. The general principle was missing: **two sets are equal
+   exactly when each is a subset of the other**, so a subset relation that provably fails
+   proves inequality.
 
-## Installation
+4. **`simplify()` ran numeric machinery on sets.** `Relational._eval_simplify` computes
+   `dif = lhs - rhs` and then calls `dif.equals(0)`, `linear_coeffs(dif, x)`,
+   `rewrite(Add, evaluate=False)` and finally compares a `count_ops`-based measure with the
+   original. For sets, `lhs - rhs` *is a set* (a `Complement`, `EmptySet` or `UniversalSet`),
+   so the first attribute lookup raised `AttributeError`; and `count_ops` walked an infinite
+   set such as `ImageSet(Lambda(x, x + 1), S.Integers)`, which does not terminate.
 
-SymPy has a hard dependency on the [mpmath](http://mpmath.org/) library
-(version \>= 0.19). You should install it first, please refer to the
-mpmath installation guide:
+## The fix
 
-<https://github.com/fredrik-johansson/mpmath#1-download--installation>
+### `sympy/sets/sets.py` — decide subsets from the elements
 
-To install SymPy using PyPI, run the following command:
+`Set.is_subset` now falls back on elementwise containment for a set that is both finite and
+iterable, and `ProductSet._contains` accepts the plain tuples its own iterator produces:
 
-    $ pip install sympy
-
-To install SymPy using Anaconda, run the following command:
-
-    $ conda install -c anaconda sympy
-
-To install SymPy from GitHub source, first clone SymPy using `git`:
-
-    $ git clone https://github.com/sympy/sympy.git
-
-Then, in the `sympy` repository that you cloned, simply run:
-
-    $ python setup.py install
-
-See <https://docs.sympy.org/dev/install.html> for more information.
-
-## Contributing
-
-We welcome contributions from anyone, even if you are new to open
-source. Please read our [Introduction to Contributing](https://github.com/sympy/sympy/wiki/Introduction-to-contributing)
-page and the [SymPy Documentation Style Guide](https://docs.sympy.org/dev/documentation-style-guide.html). If you
-are new and looking for some way to contribute, a good place to start is
-to look at the issues tagged [Easy to Fix](https://github.com/sympy/sympy/issues?q=is%3Aopen+is%3Aissue+label%3A%22Easy+to+Fix%22).
-
-Please note that all participants in this project are expected to follow
-our Code of Conduct. By participating in this project you agree to abide
-by its terms. See [CODE\_OF\_CONDUCT.md](CODE_OF_CONDUCT.md).
-
-## Tests
-
-To execute all tests, run:
-
-    $./setup.py test
-
-in the current directory.
-
-For the more fine-grained running of tests or doctests, use `bin/test`
-or respectively `bin/doctest`. The master branch is automatically tested
-by Travis CI.
-
-To test pull requests, use
-[sympy-bot](https://github.com/sympy/sympy-bot).
-
-## Regenerate Experimental <span class="title-ref">LaTeX</span> Parser/Lexer
-
-The parser and lexer generated with the [ANTLR4](http://antlr4.org)
-toolchain in `sympy/parsing/latex/_antlr` and checked into the repo.
-Presently, most users should not need to regenerate these files, but
-if you plan to work on this feature, you will need the `antlr4`
-command-line tool (and you must ensure that it is in your `PATH`).
-One way to get it is:
-
-    $ conda install -c conda-forge antlr=4.7.2
-
-Alternatively, follow the instructions on the ANTLR website and download
-the `antlr-4.7.2-complete.jar`. Then export the `CLASSPATH` as instructed
-and instead of creating `antlr4` as an alias, make it an executable file
-with the following contents:
-``` bash
-#!/bin/bash
-java -jar /usr/local/lib/antlr-4.7.2-complete.jar "$@"
+```python
+if self.is_finite_set and self.is_iterable:
+    try:
+        ret = fuzzy_and(other.contains(e) for e in self)
+    except (NotImplementedError, TypeError, ValueError):
+        ret = None            # not enumerable in practice: undecided
+    if ret is not None:
+        return ret
 ```
 
-After making changes to `sympy/parsing/latex/LaTeX.g4`, run:
+A set whose finiteness is unknown is never iterated, and a set that cannot actually be
+enumerated (for example a `Range` with a symbolic stop) leaves the question undecided instead
+of raising.
 
-    $ ./setup.py antlr
+### `sympy/sets/handlers/comparison.py` — equality from the subset relations
 
-## Clean
-
-To clean everything (thus getting the same tree as in the repository):
-
-    $ ./setup.py clean
-
-You can also clean things with git using:
-
-    $ git clean -Xdf
-
-which will clear everything ignored by `.gitignore`, and:
-
-    $ git clean -df
-
-to clear all untracked files. You can revert the most recent changes in
-git with:
-
-    $ git reset --hard
-
-WARNING: The above commands will all clear changes you may have made,
-and you will lose them forever. Be sure to check things with `git
-status`, `git diff`, `git clean -Xn` and `git clean -n` before doing any
-of those.
-
-## Bugs
-
-Our issue tracker is at <https://github.com/sympy/sympy/issues>. Please
-report any bugs that you find. Or, even better, fork the repository on
-GitHub and create a pull request. We welcome all changes, big or small,
-and we will help you make the pull request if you are new to git (just
-ask on our mailing list or Gitter Channel). If you further have any queries, you can find answers
-on Stack Overflow using the [sympy](https://stackoverflow.com/questions/tagged/sympy) tag.
-
-## Brief History
-
-SymPy was started by Ondřej Čertík in 2005, he wrote some code during
-the summer, then he wrote some more code during summer 2006. In February
-2007, Fabian Pedregosa joined the project and helped fixed many things,
-contributed documentation and made it alive again. 5 students (Mateusz
-Paprocki, Brian Jorgensen, Jason Gedge, Robert Schwarz, and Chris Wu)
-improved SymPy incredibly during summer 2007 as part of the Google
-Summer of Code. Pearu Peterson joined the development during the summer
-2007 and he has made SymPy much more competitive by rewriting the core
-from scratch, that has made it from 10x to 100x faster. Jurjen N.E. Bos
-has contributed pretty-printing and other patches. Fredrik Johansson has
-written mpmath and contributed a lot of patches.
-
-SymPy has participated in every Google Summer of Code since 2007. You
-can see <https://github.com/sympy/sympy/wiki#google-summer-of-code> for
-full details. Each year has improved SymPy by bounds. Most of SymPy's
-development has come from Google Summer of Code students.
-
-In 2011, Ondřej Čertík stepped down as lead developer, with Aaron
-Meurer, who also started as a Google Summer of Code student, taking his
-place. Ondřej Čertík is still active in the community but is too busy
-with work and family to play a lead development role.
-
-Since then, a lot more people have joined the development and some
-people have also left. You can see the full list in doc/src/aboutus.rst,
-or online at:
-
-<https://docs.sympy.org/dev/aboutus.html#sympy-development-team>
-
-The git history goes back to 2007 when development moved from svn to hg.
-To see the history before that point, look at
-<https://github.com/sympy/sympy-old>.
-
-You can use git to see the biggest developers. The command:
-
-    $ git shortlog -ns
-
-will show each developer, sorted by commits to the project. The command:
-
-    $ git shortlog -ns --since="1 year"
-
-will show the top developers from the last year.
-
-## Citation
-
-To cite SymPy in publications use
-
-> Meurer A, Smith CP, Paprocki M, Čertík O, Kirpichev SB, Rocklin M,
-> Kumar A, Ivanov S, Moore JK, Singh S, Rathnayake T, Vig S, Granger BE,
-> Muller RP, Bonazzi F, Gupta H, Vats S, Johansson F, Pedregosa F, Curry
-> MJ, Terrel AR, Roučka Š, Saboo A, Fernando I, Kulal S, Cimrman R,
-> Scopatz A. (2017) SymPy: symbolic computing in Python. *PeerJ Computer
-> Science* 3:e103 <https://doi.org/10.7717/peerj-cs.103>
-
-A BibTeX entry for LaTeX users is
-
-``` bibtex
-@article{10.7717/peerj-cs.103,
- title = {SymPy: symbolic computing in Python},
- author = {Meurer, Aaron and Smith, Christopher P. and Paprocki, Mateusz and \v{C}ert\'{i}k, Ond\v{r}ej and Kirpichev, Sergey B. and Rocklin, Matthew and Kumar, Amit and Ivanov, Sergiu and Moore, Jason K. and Singh, Sartaj and Rathnayake, Thilina and Vig, Sean and Granger, Brian E. and Muller, Richard P. and Bonazzi, Francesco and Gupta, Harsh and Vats, Shivam and Johansson, Fredrik and Pedregosa, Fabian and Curry, Matthew J. and Terrel, Andy R. and Rou\v{c}ka, \v{S}t\v{e}p\'{a}n and Saboo, Ashutosh and Fernando, Isuru and Kulal, Sumith and Cimrman, Robert and Scopatz, Anthony},
- year = 2017,
- month = Jan,
- keywords = {Python, Computer algebra system, Symbolics},
- abstract = {
-            SymPy is an open-source computer algebra system written in pure Python. It is built with a focus on extensibility and ease of use, through both interactive and programmatic applications. These characteristics have led SymPy to become a popular symbolic library for the scientific Python ecosystem. This paper presents the architecture of SymPy, a description of its features, and a discussion of select submodules. The supplementary material provides additional examples and further outlines details of the architecture and features of SymPy.
-         },
- volume = 3,
- pages = {e103},
- journal = {PeerJ Computer Science},
- issn = {2376-5992},
- url = {https://doi.org/10.7717/peerj-cs.103},
- doi = {10.7717/peerj-cs.103}
-}
+```python
+def _eval_is_eq_from_subsets(lhs, rhs):
+    try:
+        lhs_subset = lhs.is_subset(rhs)
+        rhs_subset = rhs.is_subset(lhs)
+    except Exception:
+        return None           # e.g. Range(n) or ConditionSet vs Partition
+    if lhs_subset is False or rhs_subset is False:
+        return False
+    if lhs_subset is True and rhs_subset is True:
+        return True
+    return None
 ```
 
-SymPy is BSD licensed, so you are free to use it whatever you like, be
-it academic, commercial, creating forks or derivatives, as long as you
-copy the BSD statement if you redistribute it (see the LICENSE file for
-details). That said, although not required by the SymPy license, if it
-is convenient for you, please cite SymPy when using it in your work and
-also consider contributing all your changes back, so that we can
-incorporate it and all of us will benefit in the end.
+`(Set, Set)` uses this rule directly. `(ProductSet, ProductSet)` keeps the cheap factor
+reasoning, guarded by emptiness — the empty set is a `ProductSet` in many ways, so
+`ProductSet({1})` and `ProductSet({1}, {2})` are equal while differing in one factor — and
+falls back on the subset relations when the factors cannot decide. Since `Ne` is defined as
+the negation of `Eq`, it is decided by the same rule.
+
+### `sympy/core/relational.py` — `simplify()` that understands sets
+
+`Relational._eval_simplify` and `Equality._eval_simplify` return early when either side of the
+relation is a `Set`: the arguments are simplified, the relation is re-canonicalised, and the
+numeric `equals`/`linear_coeffs`/`count_ops` path is skipped entirely.
+
+## Verification
+
+**Official result.** SWE-bench 5.0.2, dataset `SWE-bench/SWE-bench_Verified`, split `test`,
+run id `adakode-sympy-20438-v2-official`, the unmodified CLI:
+
+```bash
+swebench eval verified -p predictions_v2.json \
+  --run-id adakode-sympy-20438-v2-official -i sympy__sympy-20438 -j 1 -t 1800
+```
+
+```text
+patch_successfully_applied : true
+FAIL_TO_PASS               : 2/2   (test_Eq, test_issue_19378)
+PASS_TO_PASS               : 93/93
+infra_failure              : false
+resolved                   : true
+```
+
+**Local suites.** `sympy/sets`, `sympy/core`, `sympy/logic` and
+`sympy/testing/tests/test_code_quality.py`: 369 passed, 1 failed. The whole `sympy` suite:
+9288 passed, 9 failed, 388 skipped. Eight of those nine fail identically on the untouched base
+commit (`test_numbers.py::test_Float`, two `test_holonomic.py` tests, five
+`testing/tests/test_pytest.py` warning tests); the ninth is the stale expectation described
+under *Known limitations*.
+
+**Differential testing.** A brute-force check that enumerates ~16 900 concrete set pairs and
+compares `is_subset`/`Eq`/`Ne` against exact element enumeration: no exceptions, no wrong
+answers, 284 pre-existing problems fixed and 14 left undecided that the base commit also
+cannot answer. A 4 608-operation matrix over 47 `Set` subclasses (including geometry sets,
+`MatrixSet`, `Partition` and the complex regions) raises nothing. A base-versus-fix exception
+diff over 4 093 (pair, operation) combinations shows **no new exceptions** and 1 236
+pre-existing crashes — including several hangs in `simplify()` — removed.
+
+## Reproduce
+
+```bash
+python -m pytest sympy/sets/tests/test_finite_subset_eq.py -q
+python -m pytest sympy/sets sympy/core -q
+```
+
+```bash
+python -c "from sympy import *; \
+a = FiniteSet(1, 2); b = ProductSet(a, a); c = FiniteSet((1,1),(1,2),(2,1),(2,2)); \
+print(b.is_subset(c), c.is_subset(b), Eq(b, c).simplify(), \
+      Eq(ProductSet({1}, {2}), Interval(1, 2)) is S.false, \
+      Eq({1}, FiniteSet(Symbol('x'))).simplify() == Eq({1}, FiniteSet(Symbol('x'))))"
+# True True True True True
+```
+
+## Repository layout
+
+```text
+README.md                                   this file
+sympy-20438-fix.patch                       the graded change, as a patch against the base commit
+sympy/core/relational.py                    simplify() for relations between sets
+sympy/sets/handlers/comparison.py           equality decided from the subset relations
+sympy/sets/sets.py                          elementwise subsets; tuples in ProductSet._contains
+sympy/sets/tests/test_finite_subset_eq.py   new: 17 tests for the fixed behaviour
+```
+
+History: `HEAD~2` is a single root commit holding the base tree (this clone is a filtered
+clone, so SymPy's own 45 000-commit history is not part of this repository), `HEAD~1` is the
+fix and `HEAD` adds this README and the patch file. Upstream's own `README.md` from the base
+commit is still available as `git show HEAD~2:README.md`.
+
+## Known limitations
+
+These are unchanged by the fix and are present on the base commit as well:
+
+* `Range(0, 0, 1).is_subset(Range(1, 3, 1))` is `False`, although an empty range is a subset
+  of every set. This is an independent bug in the `(Range, Range)` handler.
+* Relations that need to compare *elements* of a set whose finiteness is not known stay
+  undecided: `Eq(FiniteSet(1, 2), ImageSet(Lambda(x, x + 1), FiniteSet(0, 1)))` and
+  `ProductSet(FiniteSet(1, 2), FiniteSet(1, 2)).is_subset(Range(0, 5))`. The fix never
+  iterates such a set, because doing so could not terminate.
+* `sympy/sets/tests/test_sets.py::test_Eq` in this snapshot still asserts the *old* behaviour
+  on one line — `assert Eq(ProductSet({1}, {2}), Interval(1, 2)) not in (S.true, S.false)` —
+  and therefore fails. The benchmark's own test patch replaces that assertion with
+  `is S.false`; with that line updated the rest of the test passes unchanged, which is exactly
+  what the official run above measured. The checked-in test is deliberately left untouched.
+
+## License
+
+SymPy is distributed under the BSD 3-clause license; see [`LICENSE`](LICENSE). This repository
+is a snapshot of the upstream project at the commit named above and keeps that license
+unchanged.
