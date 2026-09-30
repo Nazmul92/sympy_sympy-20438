@@ -42,7 +42,7 @@ needed to answer was present, but the code never used it.
 
 ## Root cause
 
-Three independent gaps, which is why the visible symptom looked inconsistent.
+Four independent gaps, which is why the visible symptom looked inconsistent.
 
 1. **`is_subset` did not try the elements.** `Set.is_subset` decided `self ⊆ other` by testing
    `self.intersect(other) == self`, which only works when that intersection is *structurally*
