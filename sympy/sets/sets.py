@@ -395,6 +395,28 @@ class Set(Basic):
         if self.intersect(other) == self:
             return True
 
+        # The intersection of two mathematically equal sets is not
+        # necessarily structurally equal to self (e.g. intersecting
+        # ProductSet(FiniteSet(1, 2), FiniteSet(1, 2)) with
+        # FiniteSet((1, 1), (1, 2), (2, 1), (2, 2)) gives that FiniteSet) so
+        # the test above cannot always decide the question. A set that is
+        # finite and iterable is determined by its elements, however, so
+        # self is a subset of other if all of its elements are elements of
+        # other.
+        if self.is_finite_set and self.is_iterable:
+            try:
+                # contains() sympifies its argument which is needed here
+                # because iteration yields plain tuples for some sets, e.g.
+                # ProductSet.
+                ret = fuzzy_and(other.contains(e) for e in self)
+            except (NotImplementedError, TypeError, ValueError):
+                # self cannot actually be enumerated (e.g. a Range with a
+                # symbolic stop) or containment is not implemented for the
+                # elements of self: nothing can be decided here.
+                ret = None
+            if ret is not None:
+                return ret
+
     def _eval_is_subset(self, other):
         '''Returns a fuzzy bool for whether self is a subset of other.'''
         return None
@@ -793,6 +815,12 @@ class ProductSet(Set):
 
         Passes operation on to constituent sets
         """
+        # Iterating over a ProductSet yields plain tuples (see __iter__) and
+        # these are equal to the corresponding Tuples so they are accepted
+        # here as well.
+        if isinstance(element, tuple) and not isinstance(element, Tuple):
+            element = Tuple(*element)
+
         if element.is_Symbol:
             return None
 

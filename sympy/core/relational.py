@@ -304,6 +304,16 @@ class Relational(Boolean, EvalfMixin):
         from .add import Add
         r = self
         r = r.func(*[i.simplify(**kwargs) for i in r.args])
+        from sympy.sets.sets import Set
+        if isinstance(self.lhs, Set) or isinstance(self.rhs, Set):
+            # A relation between sets is not a comparison of numbers: the
+            # difference of the two sides is a set rather than an expression
+            # so there is nothing to compare with zero here, and the measure
+            # used below cannot count the operations of an infinite set such
+            # as ImageSet(Lambda(x, x + 1), S.Integers) either. What the set
+            # semantics can decide has already been decided when the relation
+            # was created, so only the arguments are simplified.
+            return r.canonical if r.is_Relational else r
         if r.is_Relational:
             dif = r.lhs - r.rhs
             # replace dif with a valid Number that will
@@ -562,6 +572,12 @@ class Equality(Relational):
         e = super()._eval_simplify(**kwargs)
         if not isinstance(e, Equality):
             return e
+        from sympy.sets.sets import Set
+        if isinstance(e.lhs, Set) or isinstance(e.rhs, Set):
+            # a relation between sets has been simplified as far as the set
+            # semantics allow; the rewrite to linear coefficients below is
+            # only meaningful for expressions
+            return e.canonical
         free = self.free_symbols
         if len(free) == 1:
             try:
